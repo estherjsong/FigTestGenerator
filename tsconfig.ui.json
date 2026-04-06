@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "target": "es2017",
+    "lib": ["es2020", "DOM"],
+    "strict": true,
+    "moduleResolution": "node"
+  },
+  "include": ["ui.ts", "types.ts", "excelParser.ts", "excelWriter.ts", "geminiClient.ts", "promptBuilder.ts"]
+}

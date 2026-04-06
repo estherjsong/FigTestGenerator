@@ -1,0 +1,16 @@
+{
+  "name": "Test Scenario Generator",
+  "id": "test-scenario-generator",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": [
+    "figma"
+  ],
+  "networkAccess": {
+    "allowedDomains": [
+      "https://generativelanguage.googleapis.com",
+      "https://cdnjs.cloudflare.com"
+    ]
+  }
+}
