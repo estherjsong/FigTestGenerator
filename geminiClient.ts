@@ -14,6 +14,70 @@ function classifyError(err: unknown, httpStatus?: number): GeminiErrorType {
   return "UNKNOWN";
 }
 
+function splitMultiStepRows(rows: GeneratedTestCase[], columns: ColumnSchema): GeneratedTestCase[] {
+  // 어떤 형태의 숫자 넘버링(1. 2) [3] Step 4 등)이든 완벽하게 찢어발겨서 없애버리는 강력한 정규식
+  const stripNumbering = (str: string) => str.replace(/^["']/, '').replace(/["']$/, '').trim().replace(/^(?:스텝\s*|step\s*|단계\s*)?\d+[\.\)\]\>:-]?\s*/i, '').replace(/^[-*•]\s*/, '').trim();
+
+  const out: GeneratedTestCase[] = [];
+  for (const row of rows) {
+    let maxLines = 1;
+    const splitCols: Record<string, string[]> = {};
+    
+    // 각 컬럼의 데이터를 줄바꿈(\n) 기준으로 강제 분할
+    for (const col of columns) {
+      const val = String(row[col] || "");
+      const isStepOrResult = col.includes("스텝") || col.toLowerCase().includes("step") || col.includes("결과") || col.toLowerCase().includes("result");
+      
+      if (isStepOrResult) {
+        // 스텝과 결과는 줄바꿈 기준으로 분할 (AI가 뭉쳐놓은 경우 대비)
+        const lines = val.split(/\n/).map(s => s.trim()).filter(s => s.length > 0);
+        splitCols[col] = lines;
+        if (lines.length > maxLines) {
+          maxLines = lines.length;
+        }
+      } else {
+        // 전제조건, 입력 데이터 등은 줄바꿈이 있어도 절대 찢지 않고 한 셀(배열 길이 1)로 유지
+        splitCols[col] = [val.trim()];
+      }
+    }
+
+    if (maxLines > 1) {
+      // AI가 뭉쳐놓은 데이터를 maxLines 개수만큼의 독립된 행(Row)으로 찢어버림
+      for (let i = 0; i < maxLines; i++) {
+        const newRow: GeneratedTestCase = { ...row };
+        for (const col of columns) {
+          const isIdOrNameOrCond = col.toUpperCase().includes("ID") || col.includes("명") || col.toLowerCase().includes("name") || col.includes("전제") || col.includes("조건");
+          const isStepOrResult = col.includes("스텝") || col.toLowerCase().includes("step") || col.includes("결과") || col.toLowerCase().includes("result");
+          
+          if (splitCols[col].length > 1) {
+            let lineVal = splitCols[col][i] || "";
+            newRow[col] = isStepOrResult ? stripNumbering(lineVal) : lineVal;
+          } else if (splitCols[col].length === 1) {
+             const lineVal = splitCols[col][0];
+             // 테스트케이스 ID, 이름 등은 모든 행에 똑같이 반복 부여 (그래야 나중에 같은 케이스로 묶임)
+             newRow[col] = (isIdOrNameOrCond || i === 0) ? (isStepOrResult ? stripNumbering(lineVal) : lineVal) : "";
+          } else {
+             newRow[col] = "";
+          }
+        }
+        out.push(newRow);
+      }
+    } else {
+      // 한 줄짜리 데이터라도 앞에 붙은 넘버링 쓰레기값("1. ") 청소
+      const newRow: GeneratedTestCase = { ...row };
+      for (const col of columns) {
+        const isStepOrResult = col.includes("스텝") || col.toLowerCase().includes("step") || col.includes("결과") || col.toLowerCase().includes("result");
+        if (newRow[col]) {
+           const val = String(newRow[col]).trim();
+           newRow[col] = isStepOrResult ? stripNumbering(val) : val;
+        }
+      }
+      out.push(newRow);
+    }
+  }
+  return out;
+}
+
 async function callGeminiAndParse(
   screens: ScreenNode[], flows: FlowEdge[], scenario: ScenarioItem, columns: ColumnSchema,
   examples: ExampleRow[], inputTypeHint: FigmaInputType, apiKey: string, context?: ChunkContext
@@ -65,7 +129,10 @@ async function callGeminiAndParse(
     return result;
   });
 
-  return { data: validated, truncated };
+  // AI가 응답한 직후에 후처리기를 돌려서 뭉친 셀들을 모조리 행으로 찢음
+  const splitted = splitMultiStepRows(validated, columns);
+
+  return { data: splitted, truncated };
 }
 
 function extractLastContext(rows: GeneratedTestCase[], columns: ColumnSchema): ChunkContext {
@@ -90,6 +157,7 @@ function detectIdPattern(rows: GeneratedTestCase[], idCol: string) {
 function normalizeIds(rows: GeneratedTestCase[], columns: ColumnSchema, scenario: ScenarioItem, startNo: number = 1): GeneratedTestCase[] {
   const noCol = columns.find((c: string) => c.toUpperCase() === "NO" || c === "순번" || c === "번호");
   const idCol = columns.find((c: string) => c.includes("케이스 ID") || c.includes("케이스ID") || c.toLowerCase().includes("testcase id"));
+  const nameCol = columns.find((c: string) => c.includes("케이스 명") || c.includes("케이스명") || c.toLowerCase().includes("name"));
   
   let prefix = `${scenario.id}-`;
   let digits = 3; // 기본은 001, 002 형태
@@ -103,12 +171,40 @@ function normalizeIds(rows: GeneratedTestCase[], columns: ColumnSchema, scenario
     }
   }
 
+  let currentTcNumber = 0;
+  let prevName = "";
+  let prevRawId = "";
+
   return rows.map((row, i) => {
-    const no = startNo + i;
+    const no = startNo + i; // NO는 무조건 모든 행마다 증가
     const updated = { ...row };
     
+    const currentName = nameCol ? String(row[nameCol] || "").trim() : "";
+    const currentRawId = idCol ? String(row[idCol] || "").trim() : "";
+
+    let isNewTestCase = false;
+    if (i === 0) {
+      isNewTestCase = true;
+    } else {
+      if (currentRawId !== "" && currentRawId !== prevRawId) {
+        isNewTestCase = true; // AI가 명시적으로 새로운 ID를 줌
+      } else if (currentRawId === "" && currentName !== "" && currentName !== prevName) {
+        isNewTestCase = true; // ID는 비웠지만 이름이 바뀜
+      }
+    }
+
+    if (isNewTestCase) {
+      currentTcNumber++;
+      if (currentRawId) prevRawId = currentRawId;
+      if (currentName) prevName = currentName;
+    } else {
+      if (currentName) prevName = currentName; // 같은 케이스 내에서도 이름이 바뀔 수 있으므로 업데이트
+    }
+
     if (noCol) updated[noCol] = String(no);
-    if (idCol) updated[idCol] = `${prefix}${String(no).padStart(digits, "0")}`;
+    if (idCol) updated[idCol] = `${prefix}${String(currentTcNumber).padStart(digits, "0")}`;
+    if (nameCol && !isNewTestCase && currentName === "") updated[nameCol] = prevName;
+
     return updated;
   });
 }
@@ -116,7 +212,7 @@ function normalizeIds(rows: GeneratedTestCase[], columns: ColumnSchema, scenario
 function deduplicateByStep(rows: GeneratedTestCase[]): GeneratedTestCase[] {
   const seen = new Set<string>();
   return rows.filter(row => {
-    const key = row["테스트 스텝"] || row["테스트케이스 명"] || JSON.stringify(row);
+    const key = JSON.stringify(row);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

@@ -123,6 +123,15 @@
       }
     };
   </script>
+
+
+
+
+
+
+
+
+
 <script id="injected-script">
 "use strict";
 (() => {
@@ -33792,6 +33801,9 @@
     let columns = DEFAULT_COLUMNS;
     let exampleRows = [];
     let foundValidTemplate = false;
+    let templateSheetNameToReturn = "";
+    let dataStartRowToReturn = 1;
+    let colIndicesToReturn = [];
     let candidateSheets = wb.SheetNames.filter((n) => n !== listSheetName);
     if (candidateSheets.length === 0)
       candidateSheets = [listSheetName];
@@ -33834,6 +33846,7 @@
           }
           if (validCols.length >= 3) {
             columns = validCols.map((c) => c.name);
+            colIndicesToReturn = validCols.map((c) => c.idx);
             const dataStart = tplHeaderIdx + (headerRow2.length > 0 ? 2 : 1);
             const dataRows = templateAOA.slice(dataStart, dataStart + 3);
             exampleRows = dataRows.map((row) => {
@@ -33846,6 +33859,8 @@
               return ex;
             }).filter((ex) => Object.values(ex).some((v) => v !== ""));
             foundValidTemplate = true;
+            templateSheetNameToReturn = sheetName;
+            dataStartRowToReturn = dataStart;
             break;
           }
         }
@@ -33853,9 +33868,10 @@
     }
     if (!foundValidTemplate || columns.length < 3) {
       columns = DEFAULT_COLUMNS;
+      colIndicesToReturn = columns.map((_, i) => i);
       exampleRows = [];
     }
-    return { wb, columns, exampleRows, scenarios };
+    return { wb, columns, exampleRows, scenarios, templateSheetName: templateSheetNameToReturn, dataStartRow: dataStartRowToReturn, colIndices: colIndicesToReturn };
   }
 
   // promptBuilder.ts
@@ -33878,15 +33894,20 @@ ${JSON.stringify(screens)}
 ${JSON.stringify(flows)}
 ## Excel Column Schema (MUST USE EXACTLY THESE KEYS):
 ${JSON.stringify(columns)}
-## Example Test Cases (format reference only):
+## Example Test Cases (CRITICAL TEMPLATE FORMAT):
 ${JSON.stringify(examples)}
 ## Task:
 Generate 5~10 test cases for this scenario.
 ## Rules:
 - Output MUST be a valid JSON array ONLY. No explanation, no markdown, no code fences.
-- Each object MUST use EXACT column names as keys from the "Excel Column Schema". Never add or rename columns.
+- Each object MUST use EXACT column names as keys from the "Excel Column Schema".
 - Missing values \u2192 use empty string ""
 - If a Test Case ID column exists, format it dynamically (e.g. "${scenario.id}-001").
+- **CRITICAL MULTI-STEP RULE:** 
+  1) Every single step MUST be a separate JSON object (row). DO NOT group multiple steps into a single cell using "
+" or lists.
+  2) **DO NOT use numbering (e.g., "1.", "2.", "Step 1") for test steps.** Just write the action directly. The system will handle row numbers.
+  3) For all steps belonging to the SAME test case, YOU MUST output the EXACT SAME "Test Case Name" and "Test Case ID". Do not alter the name or ID even slightly, so they can be grouped properly.
 - Focus on: realistic user behavior, step-by-step actions, clear expected results.`;
   }
 
@@ -33904,6 +33925,57 @@ Generate 5~10 test cases for this scenario.
     if (httpStatus === 500 || httpStatus === 503)
       return "SERVER_ERROR";
     return "UNKNOWN";
+  }
+  function splitMultiStepRows(rows, columns) {
+    const stripNumbering = (str) => str.replace(/^["']/, "").replace(/["']$/, "").trim().replace(/^(?:스텝\s*|step\s*|단계\s*)?\d+[\.\)\]\>:-]?\s*/i, "").replace(/^[-*•]\s*/, "").trim();
+    const out = [];
+    for (const row of rows) {
+      let maxLines = 1;
+      const splitCols = {};
+      for (const col of columns) {
+        const val = String(row[col] || "");
+        const isStepOrResult = col.includes("\uC2A4\uD15D") || col.toLowerCase().includes("step") || col.includes("\uACB0\uACFC") || col.toLowerCase().includes("result");
+        if (isStepOrResult) {
+          const lines = val.split(/\n/).map((s) => s.trim()).filter((s) => s.length > 0);
+          splitCols[col] = lines;
+          if (lines.length > maxLines) {
+            maxLines = lines.length;
+          }
+        } else {
+          splitCols[col] = [val.trim()];
+        }
+      }
+      if (maxLines > 1) {
+        for (let i = 0; i < maxLines; i++) {
+          const newRow = __spreadValues({}, row);
+          for (const col of columns) {
+            const isIdOrNameOrCond = col.toUpperCase().includes("ID") || col.includes("\uBA85") || col.toLowerCase().includes("name") || col.includes("\uC804\uC81C") || col.includes("\uC870\uAC74");
+            const isStepOrResult = col.includes("\uC2A4\uD15D") || col.toLowerCase().includes("step") || col.includes("\uACB0\uACFC") || col.toLowerCase().includes("result");
+            if (splitCols[col].length > 1) {
+              let lineVal = splitCols[col][i] || "";
+              newRow[col] = isStepOrResult ? stripNumbering(lineVal) : lineVal;
+            } else if (splitCols[col].length === 1) {
+              const lineVal = splitCols[col][0];
+              newRow[col] = isIdOrNameOrCond || i === 0 ? isStepOrResult ? stripNumbering(lineVal) : lineVal : "";
+            } else {
+              newRow[col] = "";
+            }
+          }
+          out.push(newRow);
+        }
+      } else {
+        const newRow = __spreadValues({}, row);
+        for (const col of columns) {
+          const isStepOrResult = col.includes("\uC2A4\uD15D") || col.toLowerCase().includes("step") || col.includes("\uACB0\uACFC") || col.toLowerCase().includes("result");
+          if (newRow[col]) {
+            const val = String(newRow[col]).trim();
+            newRow[col] = isStepOrResult ? stripNumbering(val) : val;
+          }
+        }
+        out.push(newRow);
+      }
+    }
+    return out;
   }
   async function callGeminiAndParse(screens, flows, scenario, columns, examples, inputTypeHint, apiKey, context) {
     var _a, _b;
@@ -33958,7 +34030,8 @@ Rules for this chunk:
         result[col] = (_a2 = row[col]) != null ? _a2 : "";
       return result;
     });
-    return { data: validated, truncated };
+    const splitted = splitMultiStepRows(validated, columns);
+    return { data: splitted, truncated };
   }
   function extractLastContext(rows, columns) {
     var _a, _b, _c, _d;
@@ -33975,6 +34048,7 @@ Rules for this chunk:
     var _a, _b;
     const noCol = columns.find((c) => c.toUpperCase() === "NO" || c === "\uC21C\uBC88" || c === "\uBC88\uD638");
     const idCol = columns.find((c) => c.includes("\uCF00\uC774\uC2A4 ID") || c.includes("\uCF00\uC774\uC2A4ID") || c.toLowerCase().includes("testcase id"));
+    const nameCol = columns.find((c) => c.includes("\uCF00\uC774\uC2A4 \uBA85") || c.includes("\uCF00\uC774\uC2A4\uBA85") || c.toLowerCase().includes("name"));
     let prefix = `${scenario.id}-`;
     let digits = 3;
     if (idCol) {
@@ -33985,20 +34059,47 @@ Rules for this chunk:
         digits = match[2].length;
       }
     }
+    let currentTcNumber = 0;
+    let prevName = "";
+    let prevRawId = "";
     return rows.map((row, i) => {
       const no = startNo + i;
       const updated = __spreadValues({}, row);
+      const currentName = nameCol ? String(row[nameCol] || "").trim() : "";
+      const currentRawId = idCol ? String(row[idCol] || "").trim() : "";
+      let isNewTestCase = false;
+      if (i === 0) {
+        isNewTestCase = true;
+      } else {
+        if (currentRawId !== "" && currentRawId !== prevRawId) {
+          isNewTestCase = true;
+        } else if (currentRawId === "" && currentName !== "" && currentName !== prevName) {
+          isNewTestCase = true;
+        }
+      }
+      if (isNewTestCase) {
+        currentTcNumber++;
+        if (currentRawId)
+          prevRawId = currentRawId;
+        if (currentName)
+          prevName = currentName;
+      } else {
+        if (currentName)
+          prevName = currentName;
+      }
       if (noCol)
         updated[noCol] = String(no);
       if (idCol)
-        updated[idCol] = `${prefix}${String(no).padStart(digits, "0")}`;
+        updated[idCol] = `${prefix}${String(currentTcNumber).padStart(digits, "0")}`;
+      if (nameCol && !isNewTestCase && currentName === "")
+        updated[nameCol] = prevName;
       return updated;
     });
   }
   function deduplicateByStep(rows) {
     const seen = /* @__PURE__ */ new Set();
     return rows.filter((row) => {
-      const key = row["\uD14C\uC2A4\uD2B8 \uC2A4\uD15D"] || row["\uD14C\uC2A4\uD2B8\uCF00\uC774\uC2A4 \uBA85"] || JSON.stringify(row);
+      const key = JSON.stringify(row);
       if (seen.has(key))
         return false;
       seen.add(key);
@@ -34064,15 +34165,96 @@ Rules for this chunk:
   function safeSheetName(name) {
     return name.slice(0, 31).replace(new RegExp("[:\\\\/?*\\[\\]]", "g"), "_");
   }
-  function exportToExcel(originalWorkbook2, results2, columns) {
+  function exportToExcel(originalWorkbook2, results2, columns, allScenarios, templateSheetName2, dataStartRow2, fileName, colIndices2) {
     const wb = utils.book_new();
     for (const sheetName of originalWorkbook2.SheetNames) {
       utils.book_append_sheet(wb, originalWorkbook2.Sheets[sheetName], sheetName);
     }
+    const templateSheet = templateSheetName2 ? originalWorkbook2.Sheets[templateSheetName2] : null;
+    const colsToMerge = columns.map((col, idx) => {
+      const lower = col.toLowerCase();
+      if (lower === "no" || lower === "\uC21C\uBC88" || lower === "\uBC88\uD638")
+        return -1;
+      if (lower.includes("id") || lower.includes("\uBA85") || lower.includes("name") || lower.includes("\uC804\uC81C") || lower.includes("\uC870\uAC74") || lower.includes("\uACB0\uD568")) {
+        return idx;
+      }
+      return -1;
+    }).filter((idx) => idx !== -1);
+    const idColIdx = columns.findIndex((c) => c.includes("\uCF00\uC774\uC2A4 ID") || c.includes("\uCF00\uC774\uC2A4ID") || c.toLowerCase().includes("testcase id"));
     for (const [scenario, testCases] of results2) {
-      utils.book_append_sheet(wb, utils.json_to_sheet(testCases, { header: columns }), safeSheetName(scenario.id));
+      const finalName = safeSheetName(scenario.id);
+      const ws = templateSheet ? JSON.parse(JSON.stringify(templateSheet)) : {};
+      if (templateSheet) {
+        for (const key in ws) {
+          if (key.match(/^[A-Z]+(\d+)$/)) {
+            const rowNum = parseInt(RegExp.$1, 10) - 1;
+            if (rowNum >= dataStartRow2)
+              delete ws[key];
+          }
+        }
+      }
+      const maxColIdx = Math.max(...colIndices2, 0);
+      const aoaData = testCases.map((tc) => {
+        const rowArr = new Array(maxColIdx + 1).fill(null);
+        columns.forEach((colName, i) => {
+          rowArr[colIndices2[i]] = tc[colName] || "";
+        });
+        return rowArr;
+      });
+      utils.sheet_add_aoa(ws, aoaData, { origin: { r: dataStartRow2, c: 0 } });
+      ws["!merges"] = ws["!merges"] || [];
+      colsToMerge.forEach((cIdx) => {
+        const sheetColIdx = colIndices2[cIdx];
+        let startIdx = 0;
+        let currentVal = testCases[0] ? testCases[0][columns[cIdx]] : null;
+        let currentId = idColIdx !== -1 && testCases[0] ? testCases[0][columns[idColIdx]] : null;
+        for (let i = 1; i <= testCases.length; i++) {
+          const row = testCases[i];
+          const val = row ? row[columns[cIdx]] : null;
+          const id = idColIdx !== -1 && row ? row[columns[idColIdx]] : null;
+          if (val !== currentVal || idColIdx !== -1 && id !== currentId || i === testCases.length) {
+            if (i - 1 > startIdx && currentVal) {
+              ws["!merges"].push({ s: { r: startIdx + dataStartRow2, c: sheetColIdx }, e: { r: i - 1 + dataStartRow2, c: sheetColIdx } });
+              for (let clearR = startIdx + 1; clearR <= i - 1; clearR++) {
+                const cellRef = utils.encode_cell({ r: clearR + dataStartRow2, c: sheetColIdx });
+                if (ws[cellRef])
+                  ws[cellRef].v = "";
+              }
+            }
+            startIdx = i;
+            currentVal = val;
+            currentId = id;
+          }
+        }
+      });
+      wb.Sheets[finalName] = ws;
+      let insertIdx = wb.SheetNames.length;
+      const currentIdx = allScenarios.findIndex((s) => s.id === scenario.id);
+      if (currentIdx !== -1) {
+        let foundAnchor = false;
+        for (let i = currentIdx - 1; i >= 0; i--) {
+          const prevBase = safeSheetName(allScenarios[i].id);
+          const lastIdx = wb.SheetNames.lastIndexOf(prevBase);
+          if (lastIdx !== -1) {
+            insertIdx = lastIdx + 1;
+            foundAnchor = true;
+            break;
+          }
+        }
+        if (!foundAnchor) {
+          for (let i = currentIdx + 1; i < allScenarios.length; i++) {
+            const nextBase = safeSheetName(allScenarios[i].id);
+            const firstIdx = wb.SheetNames.indexOf(nextBase);
+            if (firstIdx !== -1) {
+              insertIdx = firstIdx;
+              break;
+            }
+          }
+        }
+      }
+      wb.SheetNames.splice(insertIdx, 0, finalName);
     }
-    writeFileSync(wb, "test_scenarios_output.xlsx");
+    writeFileSync(wb, fileName);
   }
 
   // figmaParser.ts
@@ -34091,6 +34273,10 @@ Rules for this chunk:
   var parsedExamples = [];
   var parsedScenarios = [];
   var originalWorkbook = null;
+  var templateSheetName = "";
+  var dataStartRow = 1;
+  var originalFileName = "test_scenarios_output.xlsx";
+  var colIndices = [];
   var results = /* @__PURE__ */ new Map();
   var el = (id) => document.getElementById(id);
   var showError = (msg) => {
@@ -34183,6 +34369,7 @@ Rules for this chunk:
     const file = (_a = fileInput.files) == null ? void 0 : _a[0];
     if (!file)
       return;
+    originalFileName = file.name;
     logDebug("4. \uB85C\uB529 \uC2A4\uD53C\uB108 \uB80C\uB354\uB9C1 \uC2DC\uB3C4");
     const originalText = btnNext.textContent || "\uB2E4\uC74C \u2192";
     btnNext.innerHTML = '<span class="spinner"></span> \uC5D1\uC140 \uBD84\uC11D \uC911...';
@@ -34213,6 +34400,9 @@ Rules for this chunk:
       parsedColumns = parsed.columns;
       parsedExamples = parsed.exampleRows;
       parsedScenarios = parsed.scenarios;
+      templateSheetName = parsed.templateSheetName;
+      dataStartRow = parsed.dataStartRow;
+      colIndices = parsed.colIndices;
       originalWorkbook = parsed.wb;
       logDebug("7. \uD654\uBA74 \uC804\uD658(Step 2) \uC131\uACF5!");
       renderScenarios();
@@ -34306,7 +34496,7 @@ Rules for this chunk:
   });
   el("btn-download").addEventListener("click", () => {
     if (originalWorkbook) {
-      exportToExcel(originalWorkbook, results, parsedColumns);
+      exportToExcel(originalWorkbook, results, parsedColumns, parsedScenarios, templateSheetName, dataStartRow, originalFileName, colIndices);
     }
   });
 })();

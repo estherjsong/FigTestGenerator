@@ -9,6 +9,10 @@ let parsedColumns: ColumnSchema = [];
 let parsedExamples: ExampleRow[] = [];
 let parsedScenarios: ScenarioItem[] = [];
 let originalWorkbook: { SheetNames: string[]; Sheets: Record<string, unknown> } | null = null;
+let templateSheetName = "";
+let dataStartRow = 1;
+let originalFileName = "test_scenarios_output.xlsx";
+let colIndices: number[] = [];
 const results = new Map<ScenarioItem, GeneratedTestCase[]>();
 
 const el = (id: string) => document.getElementById(id) as HTMLElement;
@@ -112,6 +116,7 @@ btnNext.onclick = async () => {
 
   const file = fileInput.files?.[0];
   if (!file) return;
+  originalFileName = file.name;
   
   // --- 로딩 UI 시작 ---
   logDebug("4. 로딩 스피너 렌더링 시도");
@@ -147,6 +152,9 @@ btnNext.onclick = async () => {
     parsedColumns = parsed.columns;
     parsedExamples = parsed.exampleRows;
     parsedScenarios = parsed.scenarios;
+    templateSheetName = parsed.templateSheetName;
+    dataStartRow = parsed.dataStartRow;
+    colIndices = parsed.colIndices;
     originalWorkbook = parsed.wb as { SheetNames: string[]; Sheets: Record<string, unknown> };
     
     logDebug("7. 화면 전환(Step 2) 성공!");
@@ -248,6 +256,6 @@ btnStart.addEventListener("click", async () => {
 
 el("btn-download").addEventListener("click", () => {
   if (originalWorkbook) {
-    exportToExcel(originalWorkbook, results, parsedColumns);
+    exportToExcel(originalWorkbook, results, parsedColumns, parsedScenarios, templateSheetName, dataStartRow, originalFileName, colIndices);
   }
 });

@@ -91,6 +91,9 @@ export function parseExcelFile(data: Uint8Array) {
   let columns: ColumnSchema = DEFAULT_COLUMNS;
   let exampleRows: ExampleRow[] = [];
   let foundValidTemplate = false;
+  let templateSheetNameToReturn = "";
+  let dataStartRowToReturn = 1;
+  let colIndicesToReturn: number[] = [];
 
   let candidateSheets = wb.SheetNames.filter(n => n !== listSheetName);
   if (candidateSheets.length === 0) candidateSheets = [listSheetName]; // 시트가 1개뿐인 경우 예외처리
@@ -145,6 +148,7 @@ export function parseExcelFile(data: Uint8Array) {
 
         if (validCols.length >= 3) {
           columns = validCols.map(c => c.name);
+          colIndicesToReturn = validCols.map(c => c.idx);
           
           // 예시 데이터는 찐 헤더 다음 줄부터 추출
           const dataStart = tplHeaderIdx + (headerRow2.length > 0 ? 2 : 1);
@@ -160,6 +164,8 @@ export function parseExcelFile(data: Uint8Array) {
           }).filter(ex => Object.values(ex).some(v => v !== "")); // 빈 예시 제외
           
           foundValidTemplate = true;
+          templateSheetNameToReturn = sheetName;
+          dataStartRowToReturn = dataStart;
           break;
         }
       }
@@ -169,8 +175,9 @@ export function parseExcelFile(data: Uint8Array) {
   // 적절한 컬럼을 못 찾았거나 컬럼 수가 너무 적으면 무조건 기본 템플릿(DEFAULT_COLUMNS) 사용
   if (!foundValidTemplate || columns.length < 3) {
     columns = DEFAULT_COLUMNS;
+    colIndicesToReturn = columns.map((_, i) => i);
     exampleRows = [];
   }
 
-  return { wb, columns, exampleRows, scenarios };
+  return { wb, columns, exampleRows, scenarios, templateSheetName: templateSheetNameToReturn, dataStartRow: dataStartRowToReturn, colIndices: colIndicesToReturn };
 }
